@@ -1,5 +1,6 @@
 import bcrypt from "bcryptjs";
 import jwt from 'jsonwebtoken';
+import User from "../models/User.js";
 import {
   checkUserByEmailData,
   creatUserData,
@@ -7,86 +8,121 @@ import {
 } from '../services/user.js';
 import { sendMail } from '../utils/sendEmail.js';
 import excludeitems from '../utils/exclude.js';
+
 /* eslint-disable no-undef */
 const JWTPHRASE = process.env.JWTPHRASE;
 
-export const register = async (req, res) => {
+// In-memory Map (acts like Redis)
+const signupCache = new Map();
+
+// Single API for signup (cache + register)
+export const registerUser = async (req, res) => {
   try {
-    const { email, username } = req.body;
+    const { sessionId, data, finalize } = req.body;
 
-    const checkuser = await checkUserByEmailData(email);
-    if (checkuser) {
-      return res
-        .status(402)
-        .json({ res: 'success', msg: `User is already exists with ${email}` });
+    if (!sessionId) {
+      return res.status(400).json({ message: "SessionId is required" });
     }
 
-    // generate salt to hash password
-    const salt = await bcrypt.genSalt(10);
-    let password = Math.random().toString(36).slice(2, 10);
-    const passwordhash = await bcrypt.hash(password, salt);
-    const newuser = await creatUserData({
-      email: email,
-      username: username,
-      password: passwordhash,
+    if (!finalize) {
+      // Cache step data
+      let existing = signupCache.get(sessionId) || {};
+      const merged = { ...existing, ...data };
+      signupCache.set(sessionId, merged);
+
+      return res.json({ message: "Step data cached successfully" });
+    }
+
+    // Final step → register user
+    const userData = signupCache.get(sessionId);
+    if (!userData) {
+      return res.status(400).json({ message: "No signup data found for this session" });
+    }
+
+    if (!userData.email || !userData.password) {
+      return res.status(400).json({ message: "Missing account details" });
+    }
+
+    // Hash password
+    const hashedPassword = await bcrypt.hash(userData.password, 10);
+
+    // Save user in DB
+    const newUser = new User({
+      email: userData.email,
+      password: hashedPassword,
+      companyName: userData.companyName,
+      contactPerson: userData.contactPerson,
+      gstNumber: userData.gstNumber,
+      panNumber: userData.panNumber,
+      billingAddress: userData.billingAddress,
+      billingCity: userData.billingCity,
+      billingZip: userData.billingZip,
+      billingCountry: userData.billingCountry,
+      billingPhone: userData.billingPhone,
+      shippingAddress: userData.shippingAddress,
+      shippingCity: userData.shippingCity,
+      shippingZip: userData.shippingZip,
+      shippingCountry: userData.shippingCountry,
+      shippingPhone: userData.shippingPhone,
     });
-    if (newuser) {
-      await sendMail(
-        'Welcome Car Portal (ROPSTAM)',
-        `Hello! we are glad to welcoming you for registration in our portal \n Your Email:${newuser.email} \n Your Password: ${password}\n Please use the above credentional for signing in to portal.\nThanks`,
-        newuser.email
-      );
 
-      res.status(200).json({
-        res: 'success',
-        msg: 'User is register please check your email for password',
-      });
-    } else {
-      res
-        .status(200)
-        .json({ res: 'error', msg: 'Error accourd in user registration' });
-    }
-  } catch (error) {
-    console.log('error-------------------------->', error);
-    res.status(500).json({ res: 'error', msg: 'Error accourd' });
+    await newUser.save();
+
+    // Clear cached data
+    signupCache.delete(sessionId);
+
+    return res.status(201).json({
+      message: "User registered successfully",
+      userId: newUser._id,
+    });
+  } catch (err) {
+    return res.status(500).json({ message: "Server error", error: err.message });
   }
 };
-
 export const signin = async (req, res) => {
   try {
     const { email, password } = req.body;
-    const checkuser = await checkUserByEmailData(email);
-    if (!checkuser) {
-      return res
-        .status(402)
-        .json({ res: 'success', msg: `User is not exists with ${email}` });
-    }
-    const validpassword = await bcrypt.compare(password, checkuser.password);
-    if (validpassword) {
-      const token = jwt.sign(
-        { email: checkuser.email, id: checkuser._id },
-        JWTPHRASE
-      );
 
-      const updateuser = excludeitems(
-        checkuser,
-        'password',
-        'updatedAt',
-        '__v'
-      );
-      res.status(200).json({
-        res: 'success',
-        msg: 'User is logged in succesfully',
-        data: checkuser,
-        token: token,
-        updateuser,
+    // 1. Check if user exists
+    const user = await checkUserByEmailData(email);
+    if (!user) {
+      return res.status(404).json({
+        res: "error",
+        msg: `User does not exist with email: ${email}`
       });
-    } else {
-      res.status(500).json({ res: 'error', msg: 'Error accourd in logging' });
     }
+
+    // 2. Validate password
+    const isValid = await bcrypt.compare(password, user.password);
+    if (!isValid) {
+      return res.status(401).json({
+        res: "error",
+        msg: "Invalid credentials"
+      });
+    }
+
+    // 3. Generate JWT token
+    const token = jwt.sign(
+      { email: user.email, id: user._id },
+      process.env.JWT_SECRET,   // use env variable
+      { expiresIn: "1d" }       // optional expiration
+    );
+
+    // 4. Remove sensitive fields before sending
+    const safeUser = excludeitems(user.toObject(), "password", "updatedAt", "__v");
+
+    return res.status(200).json({
+      res: "success",
+      msg: "User logged in successfully",
+      data: safeUser,
+      token,
+    });
   } catch (error) {
-    console.log('error-------------------------->', error);
-    res.status(500).json({ res: 'error', msg: 'Error accourd' });
+    console.error("Signin error:", error);
+    return res.status(500).json({
+      res: "error",
+      msg: "An error occurred during login"
+    });
   }
 };
 

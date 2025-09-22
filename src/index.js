@@ -27,7 +27,7 @@ const __dirname = path.dirname(__filename);
 app.use(express.static(path.join(__dirname, "public")));
 
 // API routes
-app.use(routes);
+app.use('/v1/api', routes);
 
 app.get("/health", (_req, res) => {
   res.status(200).json({
